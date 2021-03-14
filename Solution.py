@@ -4,7 +4,8 @@ import re
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from transformers import BertTokenizer, BertModel, pipeline
+import transformers
+transformers.logging.set_verbosity_error()
 import torch
 from progress.bar import IncrementalBar
 from joblib import dump, load
@@ -35,19 +36,28 @@ def relativize_dates_(df):
     return True
 
 
-def analyze_clusters(data):
+def analyze_clusters(data, labels):
     df = pd.DataFrame(data, columns=['Cluster', 'Label', 'Score'])
     redux = df.groupby(by=['Cluster', 'Label'], as_index=False).sum().sort_values('Score', ascending=False)
-    print(redux)
+    best_score = redux['Score'].iloc[0]
+    searching, found_labels, found_clusters, best_clusters = True, [], [], {}
+    while searching:
+        best_clusters[redux['Cluster'].iloc[0]] = [redux['Label'].iloc[0], redux['Score'].iloc[0] / best_score]
+        found_clusters.append(redux['Cluster'].iloc[0])
+        found_labels.append(redux['Label'].iloc[0])
+        redux = redux[~redux['Label'].isin(found_labels)]
+        redux = redux[~redux['Cluster'].isin(found_clusters)]
+        if len(found_labels) == len(labels):
+            searching = False
+    return best_clusters
 
-
-data = pd.read_csv('data/ailbiz_challenge_data.csv')[:300]
+data = pd.read_csv('data/ailbiz_challenge_data.csv')
 codes = pd.read_csv('data/ailbiz_challenge_codeset.csv')
 
 relativize_dates_(data)
 
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-model = BertModel.from_pretrained('bert-base-uncased')
+tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
+model = transformers.BertModel.from_pretrained('bert-base-uncased')
 raw_features = []
 bar = IncrementalBar('Embedding', max=data.shape[0], suffix='%(percent)d%%')
 for ind, line in enumerate(data['Narrative']):
@@ -67,24 +77,26 @@ features = scaler.fit_transform(raw_features)
 model = KMeans(n_clusters=len(codes))
 labels = model.fit_predict(features)
 
-classifier = pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
+classifier = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
 
 classifications = []
 for i in range(len(codes)):
     matchind = np.where([labels == i])[1]
     occupation = len(matchind)
-    size = np.minimum(100, occupation)
+    size = np.minimum(66, occupation)
     cutind = np.random.choice(a=occupation, size=size, replace=False)
     testind = matchind[cutind]
     test_set = data['Narrative'][testind]
     bar = IncrementalBar(f'Classifying group {(i + 1):02d}/{len(codes)}', max=size, suffix='%(percent)d%%')
     for sequence in test_set:
-        suggestion = classifier(sequence, codes['Description'])
-        classifications.append([i, suggestion['labels'][0], suggestion['scores'][0]])
+        result = classifier(sequence, codes['Description'])
+        for ind, guess in enumerate(result['labels']):
+            score = result['scores'][ind]
+            classifications.append([i, guess, score])
         bar.next()
     print()
 
 dump(classifications, 'cluster_labels.joblib')
 classifications = load('cluster_labels.joblib')
 
-analyze_clusters(classifications)
+print(analyze_clusters(classifications, codes['Description']))
