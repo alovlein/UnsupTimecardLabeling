@@ -37,12 +37,16 @@ def relativize_dates_(df):
 
 
 def analyze_clusters(data, labels):
+    '''
+    :param data: a 2D list or nparray with columns Cluster, Label, Score
+    :param labels: target groups to assign to clusters
+    :return: dictionary of the form {cluster_label: target_group}
+    '''
     df = pd.DataFrame(data, columns=['Cluster', 'Label', 'Score'])
     redux = df.groupby(by=['Cluster', 'Label'], as_index=False).sum().sort_values('Score', ascending=False)
-    best_score = redux['Score'].iloc[0]
     searching, found_labels, found_clusters, best_clusters = True, [], [], {}
     while searching:
-        best_clusters[redux['Cluster'].iloc[0]] = [redux['Label'].iloc[0], redux['Score'].iloc[0] / best_score]
+        best_clusters[redux['Cluster'].iloc[0]] = redux['Label'].iloc[0]
         found_clusters.append(redux['Cluster'].iloc[0])
         found_labels.append(redux['Label'].iloc[0])
         redux = redux[~redux['Label'].isin(found_labels)]
@@ -66,16 +70,18 @@ for ind, line in enumerate(data['Narrative']):
             tokenizer.encode(
                 re.compile("[^a-zA-Z]").sub('', line).lower()
             )
-        ).unsqueeze(0))[0]
-    raw_features.append(np.append(np.average(embedded.detach().numpy(), axis=1).flatten(),
-                                  [data['Timeline_Completion'][ind],
-                                  data['Effort'][ind]]))
+        ).unsqueeze(0))[0].detach().numpy()
+    raw_features.append(np.append(np.average(embedded, axis=1).flatten(), data['Timeline_Completion'][ind]))
     bar.next()
 print()
+
 scaler = StandardScaler()
 features = scaler.fit_transform(raw_features)
 model = KMeans(n_clusters=len(codes))
 labels = model.fit_predict(features)
+print(data['UID'].to_numpy().shape)
+print(labels.shape)
+raw_solutions = np.concatenate((data['UID'].to_numpy().reshape(-1, 1), labels.reshape(-1, 1)), axis=1)
 
 classifier = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
 
@@ -97,6 +103,7 @@ for i in range(len(codes)):
     print()
 
 dump(classifications, 'cluster_labels.joblib')
+dump(raw_solutions, 'raw_solutions.joblib')
 classifications = load('cluster_labels.joblib')
 
-print(analyze_clusters(classifications, codes['Description']))
+cluster_map = analyze_clusters(classifications, codes['Description'])
