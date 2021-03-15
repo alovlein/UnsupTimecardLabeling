@@ -36,17 +36,20 @@ def relativize_dates_(df):
     return True
 
 
-def analyze_clusters(data, labels):
+def analyze_clusters(data, codeset):
     '''
     :param data: a 2D list or nparray with columns Cluster, Label, Score
     :param labels: target groups to assign to clusters
     :return: dictionary of the form {cluster_label: target_group}
     '''
+    labels = codeset['Description'].to_numpy()
+    codes = codeset['Code'].to_numpy()
+
     df = pd.DataFrame(data, columns=['Cluster', 'Label', 'Score'])
     redux = df.groupby(by=['Cluster', 'Label'], as_index=False).sum().sort_values('Score', ascending=False)
     searching, found_labels, found_clusters, best_clusters = True, [], [], {}
     while searching:
-        best_clusters[redux['Cluster'].iloc[0]] = redux['Label'].iloc[0]
+        best_clusters[redux['Cluster'].iloc[0]] = codes[labels == redux['Label'].iloc[0]][0]
         found_clusters.append(redux['Cluster'].iloc[0])
         found_labels.append(redux['Label'].iloc[0])
         redux = redux[~redux['Label'].isin(found_labels)]
@@ -55,7 +58,7 @@ def analyze_clusters(data, labels):
             searching = False
     return best_clusters
 
-data = pd.read_csv('data/ailbiz_challenge_data.csv')
+data = pd.read_csv('data/ailbiz_challenge_data.csv')[:40]
 codes = pd.read_csv('data/ailbiz_challenge_codeset.csv')
 
 relativize_dates_(data)
@@ -79,8 +82,6 @@ scaler = StandardScaler()
 features = scaler.fit_transform(raw_features)
 model = KMeans(n_clusters=len(codes))
 labels = model.fit_predict(features)
-print(data['UID'].to_numpy().shape)
-print(labels.shape)
 raw_solutions = np.concatenate((data['UID'].to_numpy().reshape(-1, 1), labels.reshape(-1, 1)), axis=1)
 
 classifier = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
@@ -105,5 +106,12 @@ for i in range(len(codes)):
 dump(classifications, 'cluster_labels.joblib')
 dump(raw_solutions, 'raw_solutions.joblib')
 classifications = load('cluster_labels.joblib')
+raw_solutions = load('raw_solutions.joblib')
 
-cluster_map = analyze_clusters(classifications, codes['Description'])
+cluster_map = analyze_clusters(classifications, codes)
+
+solutions = pd.DataFrame([[raw_solutions[idx][0], cluster_map[raw_solutions[idx][1]]]
+                          for idx in range(raw_solutions.shape[0])], columns=['UID', 'Prediction_Track1'])
+
+solutions.to_csv('predictions_track1.zip', index=False,
+                 compression={'method': 'zip', 'archive_name': 'predictions_track1.csv'})
