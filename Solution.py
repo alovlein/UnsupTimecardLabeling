@@ -4,10 +4,13 @@ import re
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
 import transformers
 transformers.logging.set_verbosity_error()
 import torch
+from concurrent import futures
 from progress.bar import IncrementalBar
+from progress.spinner import PixelSpinner
 from joblib import dump, load
 
 
@@ -59,43 +62,75 @@ def analyze_clusters(data, codeset):
     return best_clusters
 
 
-def classifier(sample, targets, model=None):
+def embed_one(index, sequence):
+    embedded = model(
+        torch.tensor(
+            tokenizer.encode(
+                re.compile("[^a-zA-Z]").sub('', sequence).lower()
+            )
+        ).unsqueeze(0))[0].detach().numpy()
+    return np.append(np.average(embedded, axis=1).flatten(), data['Timeline_Completion'][index])
+
+
+def classifier(cluster_label, samples, targets, model=None):
+    classifications = []
+    assert (model is None and targets.shape[1]) or (model is not None and not targets.shape[1]), 'Incorrect target fmt'
     if model:
-        out = model(sample, targets)
+        bar = IncrementalBar(f'Classifying group {(i + 1):02d}/{len(codes)}', max=size, suffix='%(percent)d%%')
+        for sample in samples:
+            result = model(sample, targets)
+            for ind, guess in enumerate(result['labels']):
+                score = result['scores'][ind]
+                classifications.append([cluster_label, guess, score])
+            bar.next()
+        print()
     else:
-        do_something_else()
+        sim = cosine_similarity(samples, targets)
+        col_0 = np.array([cluster_label] * sim.shape[0] * sim.shape[1]).reshape(-1, 1)
+        col_1 = np.repeat(np.arange(targets.shape[0]).reshape(1, -1), sim.shape[0], axis=0).reshape(-1, 1)
+        col_2 = sim.reshape(-1, 1)
+        print(col_0.shape)
+        print(col_1.shape)
+        print(col_2.shape)
+        classifications = np.concatenate((np.concatenate((col_0, col_1), axis=1, dtype=np.int), col_2), axis=1)
+        print(classifications[:5])
+        print(classifications.shape)
+        exit(0)
+    return classifications
 
 
-
-data = pd.read_csv('data/ailbiz_challenge_data.csv')
+print('Loading data...')
+data = pd.read_csv('data/ailbiz_challenge_data.csv')[:40]
 codes = pd.read_csv('data/ailbiz_challenge_codeset.csv')
+bart_model = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
 
 relativize_dates_(data)
 
 tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
 model = transformers.BertModel.from_pretrained('bert-base-uncased')
-raw_features = []
+raw_features, embedded_code_descriptions = [], []
 bar = IncrementalBar('Embedding', max=data.shape[0], suffix='%(percent)d%%')
+for ind, line in enumerate(codes['Description']):
+    embedded_code_descriptions.append(embed_one(ind, line))
 for ind, line in enumerate(data['Narrative']):
-    embedded = model(
-        torch.tensor(
-            tokenizer.encode(
-                re.compile("[^a-zA-Z]").sub('', line).lower()
-            )
-        ).unsqueeze(0))[0].detach().numpy()
-    raw_features.append(np.append(np.average(embedded, axis=1).flatten(), data['Timeline_Completion'][ind]))
+    raw_features.append(embed_one(ind, line))
     bar.next()
 print()
+embedded_code_descriptions = np.array(embedded_code_descriptions)
+raw_features = np.array(raw_features)
 
 scaler = StandardScaler()
 features = scaler.fit_transform(raw_features)
 model = KMeans(n_clusters=len(codes))
-labels = model.fit_predict(features)
+spin = PixelSpinner('Clustering ')
+with futures.ThreadPoolExecutor(max_workers=2) as executor:
+    future = executor.submit(model.fit_predict, features)
+    executor.submit(spin.next())
+    labels = future.result()
+print()
 raw_solutions = np.concatenate((data['UID'].to_numpy().reshape(-1, 1), labels.reshape(-1, 1)), axis=1)
 
-bart_model = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
-
-classifications = []
+cluster_labels = []
 for i in range(len(codes)):
     matchind = np.where([labels == i])[1]
     occupation = len(matchind)
@@ -104,21 +139,14 @@ for i in range(len(codes)):
     cutind = np.random.choice(a=occupation, size=size, replace=False)
     testind = matchind[cutind]
     test_set = data['Narrative'][testind]
-    bar = IncrementalBar(f'Classifying group {(i + 1):02d}/{len(codes)}', max=size, suffix='%(percent)d%%')
-    for sequence in test_set:
-        result = classifier(sequence, codes['Description'])
-        for ind, guess in enumerate(result['labels']):
-            score = result['scores'][ind]
-            classifications.append([i, guess, score])
-        bar.next()
-    print()
+    cluster_labels.append(classifier(i, features[testind], embedded_code_descriptions))
 
-dump(classifications, 'cluster_labels.joblib')
+dump(cluster_labels, 'cluster_labels.joblib')
 dump(raw_solutions, 'raw_solutions.joblib')
-classifications = load('cluster_labels.joblib')
+cluster_labels = load('cluster_labels.joblib')
 raw_solutions = load('raw_solutions.joblib')
 
-cluster_map = analyze_clusters(classifications, codes)
+cluster_map = analyze_clusters(cluster_labels, codes)
 
 solutions = pd.DataFrame([[raw_solutions[idx][0], cluster_map[raw_solutions[idx][1]]]
                           for idx in range(raw_solutions.shape[0])], columns=['UID', 'Prediction_Track1'])
