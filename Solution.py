@@ -58,7 +58,16 @@ def analyze_clusters(data, codeset):
             searching = False
     return best_clusters
 
-data = pd.read_csv('data/ailbiz_challenge_data.csv')[:40]
+
+def classifier(sample, targets, model=None):
+    if model:
+        out = model(sample, targets)
+    else:
+        do_something_else()
+
+
+
+data = pd.read_csv('data/ailbiz_challenge_data.csv')
 codes = pd.read_csv('data/ailbiz_challenge_codeset.csv')
 
 relativize_dates_(data)
@@ -84,13 +93,14 @@ model = KMeans(n_clusters=len(codes))
 labels = model.fit_predict(features)
 raw_solutions = np.concatenate((data['UID'].to_numpy().reshape(-1, 1), labels.reshape(-1, 1)), axis=1)
 
-classifier = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
+bart_model = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
 
 classifications = []
 for i in range(len(codes)):
     matchind = np.where([labels == i])[1]
     occupation = len(matchind)
-    size = np.minimum(66, occupation)
+    print(f'\nGroup {(i + 1):02d} has {occupation} timecards.')
+    size = np.minimum(350, occupation)
     cutind = np.random.choice(a=occupation, size=size, replace=False)
     testind = matchind[cutind]
     test_set = data['Narrative'][testind]
