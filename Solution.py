@@ -10,7 +10,7 @@ transformers.logging.set_verbosity_error()
 import torch
 from concurrent import futures
 from progress.bar import IncrementalBar
-from progress.spinner import PixelSpinner
+from progress.spinner import PieSpinner
 from joblib import dump, load
 
 
@@ -62,7 +62,7 @@ def analyze_clusters(data, codeset):
     return best_clusters
 
 
-def embed_one(index, sequence):
+def embed_one(index, sequence, model):
     embedded = model(
         torch.tensor(
             tokenizer.encode(
@@ -72,9 +72,10 @@ def embed_one(index, sequence):
     return np.append(np.average(embedded, axis=1).flatten(), data['Timeline_Completion'][index])
 
 
-def classifier(cluster_label, samples, targets, model=None):
+def classifier(cluster_label, samples, targets, model=None, target_descriptions=None):
+    assert (model is None and targets.shape[1] and target_descriptions is not None) \
+           or (model is not None and not targets.shape[1]), 'Incompatible options selected'
     classifications = []
-    assert (model is None and targets.shape[1]) or (model is not None and not targets.shape[1]), 'Incorrect target fmt'
     if model:
         bar = IncrementalBar(f'Classifying group {(i + 1):02d}/{len(codes)}', max=size, suffix='%(percent)d%%')
         for sample in samples:
@@ -89,43 +90,46 @@ def classifier(cluster_label, samples, targets, model=None):
         col_0 = np.array([cluster_label] * sim.shape[0] * sim.shape[1]).reshape(-1, 1)
         col_1 = np.repeat(np.arange(targets.shape[0]).reshape(1, -1), sim.shape[0], axis=0).reshape(-1, 1)
         col_2 = sim.reshape(-1, 1)
-        print(col_0.shape)
-        print(col_1.shape)
-        print(col_2.shape)
-        classifications = np.concatenate((np.concatenate((col_0, col_1), axis=1, dtype=np.int), col_2), axis=1)
-        print(classifications[:5])
-        print(classifications.shape)
-        exit(0)
+        for ind in range(col_0.shape[0]):
+            classifications.append([col_0[ind][0], target_descriptions[col_1[ind][0]], col_2[ind][0]])
+        #classifications = np.concatenate((np.concatenate((col_0, col_1), axis=1, dtype=int), col_2), axis=1)
     return classifications
 
 
 print('Loading data...')
-data = pd.read_csv('data/ailbiz_challenge_data.csv')[:40]
 codes = pd.read_csv('data/ailbiz_challenge_codeset.csv')
+data = pd.read_csv('data/ailbiz_challenge_data.csv')
 bart_model = transformers.pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
 
 relativize_dates_(data)
 
 tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
-model = transformers.BertModel.from_pretrained('bert-base-uncased')
+bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
 raw_features, embedded_code_descriptions = [], []
 bar = IncrementalBar('Embedding', max=data.shape[0], suffix='%(percent)d%%')
 for ind, line in enumerate(codes['Description']):
-    embedded_code_descriptions.append(embed_one(ind, line))
+    embedded_code_descriptions.append(embed_one(ind, line, bert_model))
+embedded_code_descriptions = np.array(embedded_code_descriptions)
+'''
 for ind, line in enumerate(data['Narrative']):
-    raw_features.append(embed_one(ind, line))
+    raw_features.append(embed_one(ind, line, bert_model))
     bar.next()
 print()
-embedded_code_descriptions = np.array(embedded_code_descriptions)
+
 raw_features = np.array(raw_features)
+
+dump(raw_features, 'raw_features.joblib')
+'''
+raw_features = load('raw_features.joblib')
 
 scaler = StandardScaler()
 features = scaler.fit_transform(raw_features)
 model = KMeans(n_clusters=len(codes))
-spin = PixelSpinner('Clustering ')
+spin = PieSpinner('Clustering ')
 with futures.ThreadPoolExecutor(max_workers=2) as executor:
     future = executor.submit(model.fit_predict, features)
-    executor.submit(spin.next())
+    while not future.done():
+        executor.submit(spin.next())
     labels = future.result()
 print()
 raw_solutions = np.concatenate((data['UID'].to_numpy().reshape(-1, 1), labels.reshape(-1, 1)), axis=1)
@@ -139,7 +143,8 @@ for i in range(len(codes)):
     cutind = np.random.choice(a=occupation, size=size, replace=False)
     testind = matchind[cutind]
     test_set = data['Narrative'][testind]
-    cluster_labels.append(classifier(i, features[testind], embedded_code_descriptions))
+    cluster_labels.extend(classifier(i, features[testind], embedded_code_descriptions,
+                                     target_descriptions=codes['Description']))
 
 dump(cluster_labels, 'cluster_labels.joblib')
 dump(raw_solutions, 'raw_solutions.joblib')
